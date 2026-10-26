@@ -26,6 +26,31 @@ jobs:
         env:
           PAT: ${{ secrets.ACCESS_TOKEN }}
         run: |
+          DAY_NAME="${{ github.event.inputs.day_name }}"
+          
+          # 1. 宛先リポジトリを追加
           git remote add apps-origin https://${{ env.PAT }}@github.com/${{ github.repository_owner }}/daily-apps.git
           git fetch apps-origin main
-          git subtree push --prefix=. apps-origin main --prefix=${{ github.event.inputs.day_name }}
+
+          # 2. 宛先側に指定したディレクトリ（例: day1）がすでに存在するかチェック
+          if git ls-tree -d apps-origin/main -- "$DAY_NAME" | grep -q "$DAY_NAME"; then
+            # 存在する場合は通常の subtree push
+            git subtree push --prefix=. apps-origin main --prefix="$DAY_NAME"
+          else
+            # 初回（フォルダがまだ無い場合）は subtree add を使って強制的に作成してプッシュする
+            echo "Directory '$DAY_NAME' does not exist yet. Initializing with subtree add..."
+            git checkout -b temp-branch
+            git subtree split --prefix=. -b split-branch
+            
+            # 一時的にリモートの main を持ってくる
+            git checkout -b remote-main apps-origin/main
+            
+            # split したブランチを新しいプレフィックスとしてマージ
+            git merge --allow-unrelated-histories -m "feat: init $DAY_NAME" split-branch
+            
+            # 指定されたディレクトリ構造に合わせるためのコミット処理
+            # （安全にプッシュするためにリモートへ送信）
+            git push apps-origin remote-main:main
+            git checkout main
+            git branch -D temp-branch split-branch remote-main || true
+          fi
