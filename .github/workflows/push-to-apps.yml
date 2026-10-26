@@ -1,3 +1,4 @@
+
 name: Push to Daily Apps
 
 on:
@@ -8,50 +9,137 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   subtree-push:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      # 1. 元のリポジトリを取得
+      - name: Checkout source repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Configure Git User
+      # 2. 入力値を検証
+      - name: Validate directory name
+        env:
+          DAY_NAME: ${{ inputs.day_name }}
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
 
-      - name: Push via Split and Force Push
+          if [[ ! "$DAY_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::Invalid directory name: $DAY_NAME"
+            exit 1
+          fi
+
+          if [[ "$DAY_NAME" == "." || "$DAY_NAME" == ".." ]]; then
+            echo "::error::Directory name is not allowed."
+            exit 1
+          fi
+
+      # 3. 送信先リポジトリを取得
+      - name: Clone daily-apps
         env:
           PAT: ${{ secrets.ACCESS_TOKEN }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
-          DAY_NAME="${{ github.event.inputs.day_name }}"
+          set -euo pipefail
 
-          # 1. ルート直下の全ファイルを指定されたディレクトリ名（例: day1）にリライトした一時ブランチを作成する
-          git checkout -b temp-export-branch
-          
-          # 2. 独自のインデックスを使って新しいコミットを作り、指定フォルダの形に包む
-          mkdir -p "$DAY_NAME"
-          # .git や workflow などの不要なものを除きつつファイルを移動
-          git ls-files | while read file; do
-            if [[ "$file" != .github* ]]; then
-              mkdir -p "$DAY_NAME/$(dirname "$file")"
-              cp "$file" "$DAY_NAME/$file"
-              git add "$DAY_NAME/$file"
-              git rm --cached "$file" || true
+          if [[ -z "$PAT" ]]; then
+            echo "::error::ACCESS_TOKEN is not configured."
+            exit 1
+          fi
+
+          AUTH_HEADER="$(
+            printf 'x-access-token:%s' "$PAT" |
+            base64 -w 0
+          )"
+
+          echo "::add-mask::$AUTH_HEADER"
+
+          git -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" \
+            clone \
+            "https://github.com/${REPOSITORY_OWNER}/daily-apps.git" \
+            "$RUNNER_TEMP/daily-apps"
+
+          # 空のリポジトリにも対応
+          git -C "$RUNNER_TEMP/daily-apps" checkout -B main
+
+      # 4. 元のリポジトリのファイルを指定フォルダへコピー
+      - name: Copy source files
+        env:
+          DAY_NAME: ${{ inputs.day_name }}
+        run: |
+          set -euo pipefail
+
+          DEST="$RUNNER_TEMP/daily-apps/$DAY_NAME"
+
+          # 既存フォルダの誤上書きを防止
+          if [[ -e "$DEST" ]]; then
+            echo "::error::Directory already exists: $DAY_NAME"
+            exit 1
+          fi
+
+          mkdir -p "$DEST"
+
+          # Git管理対象のファイルをコピーする
+          # .github 以下はコピーしない
+          while IFS= read -r -d '' file; do
+            if [[ "$file" == .github/* ]]; then
+              continue
             fi
-          done
-          
-          git commit -m "feat: wrap into $DAY_NAME"
 
-          # 3. リモート（daily-apps）に接続してプッシュする
-          git remote add apps-origin https://${{ env.PAT }}@github.com/${{ github.repository_owner }}/daily-apps.git
-          git fetch apps-origin main
-          
-          # リモートの履歴と安全にマージ（初回の空リポジトリや既存リポジトリの両方に対応）
-          git checkout -b remote-main apps-origin/main || git checkout -b remote-main
-          git merge temp-export-branch --allow-unrelated-histories -m "Merge $DAY_NAME"
-          
-          # daily-apps の main へ送信
-          git push apps-origin remote-main:main
+            mkdir -p "$DEST/$(dirname "$file")"
+            cp -- "$file" "$DEST/$file"
+          done < <(git ls-files -z)
+
+          # コピーしたファイルが存在するか確認
+          if ! find "$DEST" -type f -print -quit | grep -q .; then
+            echo "::error::No files were copied."
+            exit 1
+          fi
+
+      # 5. 変更をコミット
+      - name: Commit changes
+        env:
+          DAY_NAME: ${{ inputs.day_name }}
+        run: |
+          set -euo pipefail
+
+          DEST="$RUNNER_TEMP/daily-apps"
+
+          git -C "$DEST" config user.name "github-actions[bot]"
+          git -C "$DEST" config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git -C "$DEST" add -- "$DAY_NAME"
+
+          if git -C "$DEST" diff --cached --quiet; then
+            echo "::error::No changes to commit."
+            exit 1
+          fi
+
+          git -C "$DEST" commit -m "feat: add $DAY_NAME"
+
+      # 6. daily-apps の main へプッシュ
+      - name: Push to daily-apps
+        env:
+          PAT: ${{ secrets.ACCESS_TOKEN }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          AUTH_HEADER="$(
+            printf 'x-access-token:%s' "$PAT" |
+            base64 -w 0
+          )"
+
+          echo "::add-mask::$AUTH_HEADER"
+
+          git -C "$RUNNER_TEMP/daily-apps" \
+            -c http.extraheader="AUTHORIZATION: basic $AUTH_HEADER" \
+            push origin HEAD:main
