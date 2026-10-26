@@ -1,0 +1,31 @@
+name: Push to Daily Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      day_name:
+        description: '追加するディレクトリ名（例: day1）'
+        required: true
+        type: string
+
+jobs:
+  subtree-push:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Configure Git User
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Push via Subtree
+      env:
+        PAT: ${{ secrets.ACCESS_TOKEN }}
+      run: |
+        git remote add apps-origin https://${{ env.PAT }}@github.com/${{ github.repository_owner }}/daily-apps.git
+        git fetch apps-origin main
+        git subtree push --prefix=. apps-origin main --prefix=${{ github.event.inputs.day_name }}
